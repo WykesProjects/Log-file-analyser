@@ -53,19 +53,19 @@ def parse_firewall_log(file_path: str):
         return
 
     # --- Report ---
-    print("📊 Action counts:")
+    print(" Action counts:")
     for action, count in action_counter.items():
         print(f"   {action}: {count}")
 
-    print("\n🌐 Top 5 most common source IPs:")
+    print("\n Top 5 most common source IPs:")
     for ip, count in src_ip_counter.most_common(5):
         print(f"   {ip}: {count} connections")
 
-    print("\n🔌 Top 5 destination ports:")
+    print("\n Top 5 destination ports:")
     for port, count in dst_port_counter.most_common(5):
         print(f"   Port {port}: {count} connections")
 
-    print("\n📤 List of IPs for SEND:")
+    print("\n List of IPs for SEND:")
     for ip in send_ips:
         print(f"   {ip}")
     print(f"   Total: {len(send_ips)} IPs")
