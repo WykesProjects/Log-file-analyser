@@ -1,143 +1,159 @@
+// Windows Defender Firewall Log Analyser (Go version)
+// ---------------------------------------------------
+// Parses Windows Firewall logs and produces a summary:
+// - Action counts (ALLOW / DROP)
+// - Top 5 source IPs
+// - Top 5 destination ports
+// - Lists of IPs for SEND and RECEIVE
+// - Suspicious ports (445, 3389, 22, 23)
+//
+// Usage:
+//   go run main.go
+//   (then follow prompts for input/output files)
+
 package main
 
 import (
 	"bufio"
 	"fmt"
 	"os"
-	"strings"
-	"strconv"
 	"sort"
+	"strings"
+	"time"
 )
 
-type LogEntry struct {
-	Action     string
-	Protocol   string
-	SourceIP   string
-	DestIP     string
-	SourcePort int
-	DestPort   int
-	Direction  string
-}
-
 func main() {
-	file, err := os.Open("pfirewall.log")
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Print("Enter path to firewall log file: ")
+	logPath, _ := reader.ReadString('\n')
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" {
+		logPath = "pfirewall.log"
+	}
+
+	fmt.Print("Enter path to save the output report (e.g., report.txt): ")
+	outputPath, _ := reader.ReadString('\n')
+	outputPath = strings.TrimSpace(outputPath)
+	if outputPath == "" {
+		outputPath = "report.txt"
+	}
+
+	actionCounter := make(map[string]int)
+	srcIPCounter := make(map[string]int)
+	dstPortCounter := make(map[string]int)
+	sendIPs := make(map[string]bool)
+	receiveIPs := make(map[string]bool)
+	totalEntries := 0
+
+	suspiciousPorts := map[string]bool{"445": true, "3389": true, "22": true, "23": true}
+
+	file, err := os.Open(logPath)
 	if err != nil {
-		fmt.Println("Error opening file:", err)
+		fmt.Printf("Log file not found: %s\n", logPath)
 		return
 	}
 	defer file.Close()
 
-	// Counters
-	actionCounts := map[string]int{}
-	srcIPCounts := map[string]int{}
-	dstPortCounts := map[int]int{}
-	sendIPs := map[string]bool{}
-	receiveIPs := map[string]bool{}
-
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 15 {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
 			continue
 		}
 
-		action := fields[2]
-		protocol := fields[3]
-		srcIP := fields[4]
-		dstIP := fields[5]
-		srcPort, _ := strconv.Atoi(fields[6])
-		dstPort, _ := strconv.Atoi(fields[7])
-		direction := fields[len(fields)-1]
+		parts := strings.Fields(line)
+		if len(parts) < 8 {
+			continue
+		}
 
-		// Count actions
-		actionCounts[action]++
+		action := parts[2]
+		srcIP := parts[4]
+		dstPort := parts[7]
 
-		// Count source IPs
-		srcIPCounts[srcIP]++
+		actionCounter[action]++
+		srcIPCounter[srcIP]++
+		dstPortCounter[dstPort]++
+		totalEntries++
 
-		// Count destination ports
-		dstPortCounts[dstPort]++
-
-		// Track direction
-		if direction == "SEND" {
+		if strings.HasSuffix(line, "SEND") {
 			sendIPs[srcIP] = true
-		} else if direction == "RECEIVE" {
-			receiveIPs[dstIP] = true
+		} else if strings.HasSuffix(line, "RECEIVE") {
+			receiveIPs[parts[5]] = true
 		}
-
-		_ = protocol
-		_ = srcPort
-		_ = dstIP
 	}
 
-	// Output results
-	fmt.Println("📊 Action counts:")
-	for action, count := range actionCounts {
-		fmt.Printf("   %s: %d\n", action, count)
+	var report []string
+
+	report = append(report, "Action counts:")
+	for k, v := range actionCounter {
+		report = append(report, fmt.Sprintf("   %s: %d", k, v))
 	}
 
-	// Top 5 source IPs
-	fmt.Println("\n Top 5 most common source IPs:")
-	printTopN(srcIPCounts, 5)
+	report = append(report, "\nTop 5 most common source IPs:")
+	report = append(report, topN(srcIPCounter, 5)...)
 
-	// Top 5 destination ports
-	fmt.Println("\n Top 5 destination ports:")
-	printTopNInt(dstPortCounts, 5)
+	report = append(report, "\nTop 5 destination ports:")
+	report = append(report, topN(dstPortCounter, 5)...)
 
-	// SEND IPs
-	fmt.Println("\n List of IPs for SEND:")
+	report = append(report, "\nList of IPs for SEND:")
 	for ip := range sendIPs {
-		fmt.Printf("   %s\n", ip)
+		report = append(report, "   "+ip)
 	}
-	fmt.Printf("   Total: %d IPs\n", len(sendIPs))
+	report = append(report, fmt.Sprintf("   Total: %d IPs", len(sendIPs)))
 
-	// RECEIVE IPs
-	fmt.Println("\n List of IPs for RECEIVE:")
+	report = append(report, "\nList of IPs for RECEIVE:")
 	for ip := range receiveIPs {
-		fmt.Printf("   %s\n", ip)
+		report = append(report, "   "+ip)
 	}
-	fmt.Printf("   Total: %d IPs\n", len(receiveIPs))
+	report = append(report, fmt.Sprintf("   Total: %d IPs", len(receiveIPs)))
 
-	// Suspicious ports
-	suspicious := []int{22, 23, 445, 3389}
-	fmt.Println("\n List of IPs/port ranges of concern:")
-	for _, p := range suspicious {
-		if c, ok := dstPortCounts[p]; ok {
-			fmt.Printf("   Port %d: %d connections\n", p, c)
+	report = append(report, "\nList of IPs/port ranges of concern:")
+	flagged := false
+	for port, count := range dstPortCounter {
+		if suspiciousPorts[port] {
+			report = append(report, fmt.Sprintf("   Port %s: %d connections", port, count))
+			flagged = true
 		}
+	}
+	if !flagged {
+		report = append(report, "   None flagged")
+	}
+
+	// Add footer with timestamp and total entries
+	now := time.Now().Format("2006-01-02 15:04:05")
+	report = append(report, fmt.Sprintf("\n✅ Analysis complete: %d entries processed", totalEntries))
+	report = append(report, fmt.Sprintf("Run on: %s", now))
+
+	fmt.Println(strings.Join(report, "\n"))
+
+	err = os.WriteFile(outputPath, []byte(strings.Join(report, "\n")), 0644)
+	if err != nil {
+		fmt.Printf("Could not write report: %v\n", err)
+	} else {
+		fmt.Printf("\nReport written to %s\n", outputPath)
 	}
 }
 
-func printTopN(m map[string]int, n int) {
+// topN returns the top N entries from a counter map as a slice of strings
+func topN(counter map[string]int, n int) []string {
 	type kv struct {
 		Key   string
 		Value int
 	}
-	var sorted []kv
-	for k, v := range m {
-		sorted = append(sorted, kv{k, v})
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Value > sorted[j].Value
-	})
-	for i := 0; i < len(sorted) && i < n; i++ {
-		fmt.Printf("   %s: %d connections\n", sorted[i].Key, sorted[i].Value)
-	}
-}
 
-func printTopNInt(m map[int]int, n int) {
-	type kv struct {
-		Key   int
-		Value int
+	var ss []kv
+	for k, v := range counter {
+		ss = append(ss, kv{k, v})
 	}
-	var sorted []kv
-	for k, v := range m {
-		sorted = append(sorted, kv{k, v})
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Value > sorted[j].Value
+
+	sort.Slice(ss, func(i, j int) bool {
+		return ss[i].Value > ss[j].Value
 	})
-	for i := 0; i < len(sorted) && i < n; i++ {
-		fmt.Printf("   Port %d: %d connections\n", sorted[i].Key, sorted[i].Value)
+
+	var lines []string
+	for i := 0; i < len(ss) && i < n; i++ {
+		lines = append(lines, fmt.Sprintf("   %s: %d connections", ss[i].Key, ss[i].Value))
 	}
+	return lines
 }
